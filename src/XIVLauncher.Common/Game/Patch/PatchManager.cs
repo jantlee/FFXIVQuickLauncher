@@ -33,6 +33,8 @@ namespace XIVLauncher.Common.Game.Patch
     public class PatchManager
     {
         public const int MAX_DOWNLOADS_AT_ONCE = 4;
+        private const int MAX_RETRIES_PER_PATCH = 3;
+        private const int RETRY_DELAY_MS = 2500;
 
         private readonly CancellationTokenSource _cancelTokenSource = new();
 
@@ -179,55 +181,107 @@ namespace XIVLauncher.Common.Game.Patch
                 return;
             }
 
-            var acquisitionTask = this.acquisition.MakeTask(realUrl, outFile);
-            acquisitionTask.ProgressChanged += (_, args) =>
+            var patchKey = download.Patch.VersionId;
+
+            for (var attempt = 0; attempt <= MAX_RETRIES_PER_PATCH; attempt++)
             {
-                Progresses[index] = args.Progress;
-                Speeds[index] = args.BytesPerSecondSpeed;
-            };
-
-            acquisitionTask.Complete += (_, args) =>
-            {
-                void HandleError(string context)
-                {
-                    if (this.hasError)
-                        return;
-
-                    this.hasError = true;
-
-                    CancelAllDownloads();
-                    OnFail?.Invoke(download.Patch, context);
-                }
-
-                if (args == AcquisitionResult.Error)
-                {
-                    Log.Error("Download failed for {VersionId}", download.Patch.VersionId);
-                    HandleError("Download");
+                if (this.hasError || this.IsCancelling)
                     return;
+
+                if (attempt > 0)
+                {
+                    Log.Warning("Retry {Attempt}/{MaxRetries} for patch {VersionId}", attempt, MAX_RETRIES_PER_PATCH, patchKey);
+                    await Task.Delay(RETRY_DELAY_MS);
+
+                    // Delete the corrupted file before re-downloading
+                    try
+                    {
+                        outFile.Refresh();
+                        if (outFile.Exists)
+                        {
+                            outFile.Delete();
+                            Log.Information("Deleted corrupted patch file {Path}", outFile.FullName);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Failed to delete corrupted patch file {Path}", outFile.FullName);
+                    }
+
+                    Progresses[index] = 0;
+                    Speeds[index] = 0;
+                    Slots[index] = SlotState.InProgress;
                 }
 
-                if (args == AcquisitionResult.Cancelled)
+                var tcs = new TaskCompletionSource<AcquisitionResult>();
+
+                var acquisitionTask = this.acquisition.MakeTask(realUrl, outFile);
+                acquisitionTask.ProgressChanged += (_, args) =>
                 {
-                    // Cancellation should not produce an error message, since it is always triggered by another error or the user.
+                    Progresses[index] = args.Progress;
+                    Speeds[index] = args.BytesPerSecondSpeed;
+                };
+
+                acquisitionTask.Complete += (_, args) =>
+                {
+                    tcs.TrySetResult(args);
+                };
+
+                this.AcquisitionTasks[index] = acquisitionTask;
+
+                await acquisitionTask.StartAsync();
+
+                var result = await tcs.Task;
+
+                if (result == AcquisitionResult.Cancelled)
+                {
                     Log.Error("Download cancelled for {0}", download.Patch.VersionId);
-
                     return;
                 }
 
-                // Indicate "Checking..."
+                if (result == AcquisitionResult.Error)
+                {
+                    Log.Error("Download failed for {VersionId} (attempt {Attempt})", download.Patch.VersionId, attempt + 1);
+
+                    if (attempt < MAX_RETRIES_PER_PATCH)
+                        continue;
+
+                    // Exhausted retries on download error
+                    if (!this.hasError)
+                    {
+                        this.hasError = true;
+                        CancelAllDownloads();
+                        OnFail?.Invoke(download.Patch, "Download");
+                    }
+                    return;
+                }
+
+                // Download succeeded, check hash
                 Slots[index] = SlotState.Checking;
 
                 var checkResult = CheckPatchValidity(download.Patch, outFile);
 
-                this.downloadFinalizationLock.WaitOne();
-
-                // Let's just bail for now, need better handling of this later
                 if (checkResult != HashCheckResult.Pass)
                 {
-                    Log.Error("CheckPatchValidity failed with {Result} for {VersionId} after DL", checkResult, download.Patch.VersionId);
-                    HandleError($"ValidityCheck ({checkResult})");
+                    Log.Error("CheckPatchValidity failed with {Result} for {VersionId} after DL (attempt {Attempt})", checkResult, download.Patch.VersionId, attempt + 1);
+
+                    if (attempt < MAX_RETRIES_PER_PATCH)
+                        continue;
+
+                    // Exhausted retries on hash failure
+                    this.downloadFinalizationLock.WaitOne();
+                    if (!this.hasError)
+                    {
+                        this.hasError = true;
+                        CancelAllDownloads();
+                        OnFail?.Invoke(download.Patch, $"ValidityCheck ({checkResult})");
+                    }
+                    this.downloadFinalizationLock.ReleaseMutex();
                     return;
                 }
+
+                // Hash passed
+                this.downloadFinalizationLock.WaitOne();
 
                 download.State = PatchState.Downloaded;
                 Slots[index] = SlotState.Done;
@@ -238,11 +292,8 @@ namespace XIVLauncher.Common.Game.Patch
 
                 this.CheckIsDone();
                 this.downloadFinalizationLock.ReleaseMutex();
-            };
-
-            this.AcquisitionTasks[index] = acquisitionTask;
-
-            await acquisitionTask.StartAsync();
+                return;
+            }
         }
 
         private void CancelAllDownloads()

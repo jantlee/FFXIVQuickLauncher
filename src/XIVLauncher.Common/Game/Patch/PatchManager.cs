@@ -185,14 +185,16 @@ namespace XIVLauncher.Common.Game.Patch
 
             var patchKey = download.Patch.VersionId;
 
-            for (var attempt = 0; attempt <= MAX_RETRIES_PER_PATCH; attempt++)
+            var attempt = 0;
+
+            while (true)
             {
                 if (this.hasError || this.IsCancelling)
                     return;
 
                 if (attempt > 0)
                 {
-                    Log.Warning("Retry {Attempt}/{MaxRetries} for patch {VersionId}", attempt, MAX_RETRIES_PER_PATCH, patchKey);
+                    Log.Warning("Retry {Attempt} for patch {VersionId}", attempt, patchKey);
                     RetryAttempts[index] = attempt;
                     Slots[index] = SlotState.Retrying;
                     await Task.Delay(RETRY_DELAY_MS);
@@ -245,18 +247,8 @@ namespace XIVLauncher.Common.Game.Patch
                 if (result == AcquisitionResult.Error)
                 {
                     Log.Error("Download failed for {VersionId} (attempt {Attempt})", download.Patch.VersionId, attempt + 1);
-
-                    if (attempt < MAX_RETRIES_PER_PATCH)
-                        continue;
-
-                    // Exhausted retries on download error
-                    if (!this.hasError)
-                    {
-                        this.hasError = true;
-                        CancelAllDownloads();
-                        OnFail?.Invoke(download.Patch, "Download");
-                    }
-                    return;
+                    attempt++;
+                    continue;
                 }
 
                 // Download succeeded, check hash
@@ -267,20 +259,8 @@ namespace XIVLauncher.Common.Game.Patch
                 if (checkResult != HashCheckResult.Pass)
                 {
                     Log.Error("CheckPatchValidity failed with {Result} for {VersionId} after DL (attempt {Attempt})", checkResult, download.Patch.VersionId, attempt + 1);
-
-                    if (attempt < MAX_RETRIES_PER_PATCH)
-                        continue;
-
-                    // Exhausted retries on hash failure
-                    this.downloadFinalizationLock.WaitOne();
-                    if (!this.hasError)
-                    {
-                        this.hasError = true;
-                        CancelAllDownloads();
-                        OnFail?.Invoke(download.Patch, $"ValidityCheck ({checkResult})");
-                    }
-                    this.downloadFinalizationLock.ReleaseMutex();
-                    return;
+                    attempt++;
+                    continue;
                 }
 
                 // Hash passed

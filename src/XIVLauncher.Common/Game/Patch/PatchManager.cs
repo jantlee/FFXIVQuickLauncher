@@ -33,7 +33,7 @@ namespace XIVLauncher.Common.Game.Patch
     public class PatchManager
     {
         public const int MAX_DOWNLOADS_AT_ONCE = 4;
-        private const int MAX_RETRIES_PER_PATCH = 3;
+        public const int MAX_RETRIES_PER_PATCH = 3;
         private const int RETRY_DELAY_MS = 2500;
 
         private readonly CancellationTokenSource _cancelTokenSource = new();

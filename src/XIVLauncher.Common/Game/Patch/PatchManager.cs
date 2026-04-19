@@ -59,12 +59,14 @@ namespace XIVLauncher.Common.Game.Patch
             InProgress,
             Checking,
             Done,
+            Retrying,
         }
 
         public readonly long[] Progresses = new long[MAX_DOWNLOADS_AT_ONCE];
         public readonly double[] Speeds = new double[MAX_DOWNLOADS_AT_ONCE];
         public readonly PatchDownload?[] Actives = new PatchDownload[MAX_DOWNLOADS_AT_ONCE];
         public readonly SlotState[] Slots = new SlotState[MAX_DOWNLOADS_AT_ONCE];
+        public readonly int[] RetryAttempts = new int[MAX_DOWNLOADS_AT_ONCE];
         public readonly PatchAcquisitionTask?[] AcquisitionTasks = new PatchAcquisitionTask[MAX_DOWNLOADS_AT_ONCE];
 
         public bool IsInstallerBusy { get; private set; }
@@ -191,9 +193,10 @@ namespace XIVLauncher.Common.Game.Patch
                 if (attempt > 0)
                 {
                     Log.Warning("Retry {Attempt}/{MaxRetries} for patch {VersionId}", attempt, MAX_RETRIES_PER_PATCH, patchKey);
+                    RetryAttempts[index] = attempt;
+                    Slots[index] = SlotState.Retrying;
                     await Task.Delay(RETRY_DELAY_MS);
 
-                    // Delete the corrupted file before re-downloading
                     try
                     {
                         outFile.Refresh();
